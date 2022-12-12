@@ -135,29 +135,24 @@ ds1 %>%
   mutate(across(spot, as_factor)) %>%
   filter(trap == "rat") %>%
   group_split(line, spot) %>%
-  # pluck(2) %>%
-  # mutate(n_day = c(0, as.numeric(diff(date)))) %>%
   map(~ .x %>%
         arrange(date) %>%
         mutate(sqce = c(0, as.numeric(diff(date)) - 1),
                sqce = if_else(sqce < 1, 0, 1) %>% cumsum() %>% "+"(1))) %>%
   bind_rows() %>%
-  group_by(line, spot, sqce) %>%
-  mutate(across(effort_in_day, sum)) %>%
-  rowid_to_column("n_day") %>%
-  ungroup() %>%
-  relocate(sqce, n_day, effort_in_day, .after = line) %>%
-  arrange(line, date, spot) %>%
-  view()
+  group_split(line, spot, sqce) %>%
+  map( ~ .x %>%
+         rowid_to_column("day_id_of_sq")) %>%
+  bind_rows() %>%
+  add_count(line, sqce, day_id_of_sq, name = "trap_in_sq_day") %>%
+  relocate(spot, date, sqce, day_id_of_sq, trap_in_sq_day, .after = line) %>%
+  arrange(line, spot, date) -> ds2
 
-
-
-# Model deplet --------------------------------------------------------------------------------
+# Spatial disitribution -----------------------------------------------------------------------
 
 local_proj <- "+proj=laea +x_0=0 +y_0=0 +lon_0=-61.5906 +lat_0=15.8376"
 
-ds1 %>%
-  filter(trap == "rat") %>%
+ds2 %>%
   distinct(line, spot, lon, lat) %>%
   st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
   st_transform(crs = local_proj) %>%
@@ -166,11 +161,11 @@ ds1 %>%
   summarize(across(geometry, st_union)) %>%
   mutate(area = st_area(geometry),
          co = usecol(pal_unikn_light, n = 4)[as.numeric(as.factor(line))]) %>%
-  st_transform(4326) -> ds2
+  st_transform(4326) -> ds_map3
 
 map_base %>%
   addPolygons(
-    data = ds2,
+    data = ds_map3,
     group = ~ line,
     fillColor = ~ co,
     fillOpacity = 0.3,
@@ -192,12 +187,60 @@ map_base %>%
                    baseGroups = c("Sat. Geoportail",
                                   "Sat. ESRI",
                                   "Topo. Open"),
-                   overlayGroups = unique(ds_map2$line),
+                   overlayGroups = unique(ds_map3$line),
                    options = layersControlOptions(collapsed = FALSE)) -> map_3; map_3
 
 
+# Data exploration for model ------------------------------------------------------------------
 
+ds2 %>%
+  mutate(age =
+           case_when(
+             wgt_g < 150 ~ "imm",
+             catch == "r" ~ "mat")) %>%
+  group_by(line, sqce, day_id_of_sq, trap_in_sq_day, age) %>%
+  summarize(across(nb, sum, na.rm = TRUE)) %>%
+  ungroup() %>%
+  complete(age, nesting(line, sqce, day_id_of_sq, trap_in_sq_day), fill = list(nb = 0)) %>%
+  arrange(line, sqce, day_id_of_sq, trap_in_sq_day, age) %>%
+  filter(!is.na(age)) %>%
+  mutate(cptd = nb / trap_in_sq_day) %>%
+  select(line, sqce, day_id_of_sq, age, cptd) -> ds3
 
+ds3 %>%
+  filter(line != "Bivouac") %>%
+  group_by(across(-c(age, cptd))) %>%
+  summarize(across(cptd, sum)) %>%
+  group_by(day_id_of_sq) %>%
+  summarize(across(cptd, mean)) %>%
+  ggplot(aes(x = day_id_of_sq, y = cptd)) +
+  geom_col()
+
+ds3 %>%
+  filter(line != "Bivouac") %>%
+  group_by(across(-c(cptd))) %>%
+  summarize(across(cptd, sum)) %>%
+  ungroup() %>%
+  ggplot(aes(x = day_id_of_sq, y = cptd, fill = age)) +
+  geom_col(position = "dodge")
+
+ds3 %>%
+  filter(line != "Bivouac") %>%
+  group_by(across(-c(age, cptd))) %>%
+  summarize(across(cptd, sum)) %>%
+  ggplot(aes(x = day_id_of_sq, y = cptd, fill = interaction(line, sqce))) +
+  geom_col(position = "dodge") +
+  facet_grid(line ~ sqce)
+
+ds3 %>%
+  filter(line != "Bivouac") %>%
+  ggplot(aes(x = day_id_of_sq, y = cptd, fill = interaction(line, sqce))) +
+  geom_col(position = "dodge") +
+  facet_grid(line ~ sqce + age)
+
+# Data formatting for model -------------------------------------------------------------------
+
+ds2
 
 JuvCode <- nimbleCode(
   {
