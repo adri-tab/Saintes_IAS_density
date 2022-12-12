@@ -6,6 +6,7 @@ require(leafem)
 require(readxl)
 require(unikn)
 require(rnaturalearth)
+require(rnaturalearthdata)
 
 # Data import ---------------------------------------------------------------------------------
 
@@ -14,7 +15,6 @@ excel_sheets("./Data/database.xlsx") %>%
                   sheet = .x)) -> db1
 
 # Coord correction ----------------------------------------------------------------------------
-
 
 db1 %>% pluck(1) -> spot1
 
@@ -94,7 +94,7 @@ ds1 %>%
 
 ds1 %>%
   filter(catch == "r") %>%
-  mutate(age = if_else(wgt_g < 120, "imm", "mat")) %>%
+  mutate(age = if_else(wgt_g < 150, "imm", "mat")) %>%
   group_by(line, age, date) %>%
   summarize(across(nb, sum)) %>%
   ungroup() %>%
@@ -131,6 +131,26 @@ map_base %>%
                    overlayGroups = unique(ds_map2$line),
                    options = layersControlOptions(collapsed = FALSE)) -> map_2; map_2
 
+ds1 %>%
+  mutate(across(spot, as_factor)) %>%
+  filter(trap == "rat") %>%
+  group_split(line, spot) %>%
+  # pluck(2) %>%
+  # mutate(n_day = c(0, as.numeric(diff(date)))) %>%
+  map(~ .x %>%
+        arrange(date) %>%
+        mutate(sqce = c(0, as.numeric(diff(date)) - 1),
+               sqce = if_else(sqce < 1, 0, 1) %>% cumsum() %>% "+"(1))) %>%
+  bind_rows() %>%
+  group_by(line, spot, sqce) %>%
+  mutate(across(effort_in_day, sum)) %>%
+  rowid_to_column("n_day") %>%
+  ungroup() %>%
+  relocate(sqce, n_day, effort_in_day, .after = line) %>%
+  arrange(line, date, spot) %>%
+  view()
+
+
 
 # Model deplet --------------------------------------------------------------------------------
 
@@ -144,23 +164,40 @@ ds1 %>%
   st_buffer(dist = 30) %>%
   group_by(line) %>%
   summarize(across(geometry, st_union)) %>%
-  mutate(area = st_area(geometry)) -> ds2
+  mutate(area = st_area(geometry),
+         co = usecol(pal_unikn_light, n = 4)[as.numeric(as.factor(line))]) %>%
+  st_transform(4326) -> ds2
 
-ne_countries(scale = "medium", returnclass = "sf") %>%
-  st_set_crs(4326) -> cou
+map_base %>%
+  addPolygons(
+    data = ds2,
+    group = ~ line,
+    fillColor = ~ co,
+    fillOpacity = 0.3,
+    stroke = TRUE,
+    color = ~ co,
+    opacity = 0.7,
+    label = ~ str_c(line, " buffer: ", round(area), "m²")) %>%
+  addCircleMarkers(
+    data = ds_map2,
+    radius = ~ 15 * log10(1 + 1),
+    group = ~ line,
+    fillColor = ~ co,
+    fillOpacity = 1,
+    stroke = TRUE,
+    color = ~ co,
+    weight = 2,
+    label = ~ str_c(rat, " rat(s)")) %>%
+  addLayersControl(position = "topleft",
+                   baseGroups = c("Sat. Geoportail",
+                                  "Sat. ESRI",
+                                  "Topo. Open"),
+                   overlayGroups = unique(ds_map2$line),
+                   options = layersControlOptions(collapsed = FALSE)) -> map_3; map_3
 
-tibble(x = c(-61.6018, -61.5783), y = c(15.8304, 15.8452)) %>%
-  st_as_sf(coords = c("x", "y"), crs = 4326) %>%
-  st_transform(crs = local_proj) %>%
-  st_coordinates() %>%
-  as_tibble() -> border
 
-ggplot() +
-  geom_sf(data = cou, fill = "antiquewhite1", size = .4) +
-  coord_sf(crs = "+proj=laea +x_0=0 +y_0=0 +lon_0=-61.5906 +lat_0=15.8376",
-           xlim = border$X, ylim = border$Y) +
-  geom_sf(ds2, mapping = aes(fill = line)) +
-  theme_minimal()
+
+
 
 JuvCode <- nimbleCode(
   {
